@@ -47,9 +47,9 @@ benchmark_dataset = [
             "modifier": "Text2Image",
             "modifications": {
                 "prompt": prompt,
-                "width": 512,
-                "height": 512,
-                "steps": 20,
+                "width": 4096,
+                "height": 4096,
+                "steps": 200,
                 "seed": random.randint(0, sys.maxsize)
             }
         }
