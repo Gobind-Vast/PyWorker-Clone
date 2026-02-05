@@ -1,5 +1,10 @@
 import base64
+import json
 import os
+import re
+
+from aiohttp import web, ClientResponse
+from typing import Union
 
 from vastai import Worker, WorkerConfig, HandlerConfig, LogActionConfig, BenchmarkConfig
 
@@ -34,6 +39,12 @@ IMAGE_PATHS = [
 # The condition to evaluate
 CONDITION = "A baby is present"
 
+# Validation thresholds
+EXPECTED_SCORES = {
+    "present.jpg": {"min": 0.7, "max": 1.0},      # Should return high confidence
+    "not-present.jpg": {"min": 0.0, "max": 0.3},  # Should return low confidence
+}
+
 def load_image_as_base64(image_path: str) -> str:
     """Load an image file and return its base64 encoding."""
     with open(image_path, "rb") as f:
@@ -55,6 +66,83 @@ def request_parser(request):
         data = request.get("input")
     return data
 
+def extract_score(text: str) -> float:
+    """Extract a float score from model response text."""
+    text = text.strip()
+    # Try direct float parse first
+    try:
+        return float(text)
+    except ValueError:
+        pass
+    # Try to find a float pattern in the text
+    match = re.search(r'(\d+\.?\d*)', text)
+    if match:
+        return float(match.group(1))
+    raise ValueError(f"Could not extract score from: {text}")
+
+async def validate_response(
+    client_request: web.Request,
+    model_response: ClientResponse
+) -> Union[web.Response, web.StreamResponse]:
+    """Validate that the model returns expected confidence scores."""
+    # Read the response body
+    response_body = await model_response.read()
+    content_type = model_response.content_type or "application/json"
+
+    # Read the request to get the image name
+    request_body = await client_request.text()
+    request_data = json.loads(request_body)
+    image_name = request_data.get("_image_name", "unknown")
+
+    try:
+        response_data = json.loads(response_body)
+
+        # Extract the model's response content
+        choices = response_data.get("choices", [])
+        if not choices:
+            raise ValueError("No choices in response")
+
+        message = choices[0].get("message", {})
+        content = message.get("content", "")
+
+        # Extract the confidence score
+        score = extract_score(content)
+
+        # Validate against expected range
+        if image_name in EXPECTED_SCORES:
+            expected = EXPECTED_SCORES[image_name]
+            if not (expected["min"] <= score <= expected["max"]):
+                error_msg = (
+                    f"VALIDATION FAILED for {image_name}: "
+                    f"score {score} not in expected range [{expected['min']}, {expected['max']}]"
+                )
+                print(f"[VALIDATION] {error_msg}")
+                return web.Response(
+                    body=json.dumps({"error": error_msg, "score": score, "image": image_name}),
+                    status=400,
+                    content_type="application/json"
+                )
+            else:
+                print(f"[VALIDATION] PASSED for {image_name}: score {score} in range [{expected['min']}, {expected['max']}]")
+        else:
+            print(f"[VALIDATION] WARNING: No expected score defined for {image_name}, score was {score}")
+
+        # Return the original response (validation passed)
+        return web.Response(
+            body=response_body,
+            status=model_response.status,
+            content_type=content_type
+        )
+
+    except Exception as e:
+        error_msg = f"VALIDATION ERROR for {image_name}: {str(e)}"
+        print(f"[VALIDATION] {error_msg}")
+        return web.Response(
+            body=json.dumps({"error": error_msg, "image": image_name}),
+            status=400,
+            content_type="application/json"
+        )
+
 # Build benchmark dataset with both images
 benchmark_dataset = []
 for image_path in IMAGE_PATHS:
@@ -63,6 +151,7 @@ for image_path in IMAGE_PATHS:
 
     benchmark_data = {
         "model": os.environ.get("MODEL_NAME", "Qwen/Qwen3-VL-4B-Instruct"),
+        "_image_name": image_name,  # For validation tracking
         "messages": [
             {
                 "role": "user",
@@ -84,7 +173,7 @@ for image_path in IMAGE_PATHS:
         "temperature": 0.0,
     }
 
-    benchmark_dataset.append({"input": benchmark_data, "_image_name": image_name})
+    benchmark_dataset.append({"input": benchmark_data})
 
 worker_config = WorkerConfig(
     model_server_url=MODEL_SERVER_URL,
@@ -97,6 +186,7 @@ worker_config = WorkerConfig(
             workload_calculator=lambda data: data.get("max_tokens", 0),
             allow_parallel_requests=True,
             request_parser=request_parser,
+            response_generator=validate_response,
             max_queue_time=600.0,
             benchmark_config=BenchmarkConfig(
                 dataset=benchmark_dataset,
