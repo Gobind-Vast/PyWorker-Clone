@@ -167,7 +167,7 @@ class Benchmark:
 
 
 BENCHMARKS = {
-    routes.COMPLETIONS: Benchmark(10, 3, completions_benchmark_generator),
+    routes.COMPLETIONS: Benchmark(64, 3, completions_benchmark_generator),  # bench/heavy-load-64: 4-GPU servers
     routes.CHAT: Benchmark(10, 3, chat_benchmark_generator),
     routes.EMBEDDINGS: Benchmark(10, 3, embeddings_benchmark_generator),
     routes.RERANK: Benchmark(10, 3, rerank_benchmark_generator),
